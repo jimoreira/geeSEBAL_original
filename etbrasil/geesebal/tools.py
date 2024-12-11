@@ -27,15 +27,15 @@ def fexp_spec_ind(image):
 
     #ENHANCED VEGETATION INDEX (EVI)
     evi = image.expression('2.5 * ((N - R) / (N + (6 * R) - (7.5 * B) + 1))', {
-        'N': image.select('NIR').divide(10000),
-        'R': image.select('R').divide(10000),
-        'B': image.select('B').divide(10000),}).rename('EVI');
+        'N': image.select('NIR'),
+        'R': image.select('R'),
+        'B': image.select('B'),}).rename('EVI');
 
     #SOIL ADHUSTED VEGETATION INDEX (SAVI)
     savi = image.expression(
       '((1 + 0.5)*(B5 - B4)) / (0.5 + (B5 + B4))', {
-        'B4': image.select('R').divide(10000),
-        'B5': image.select('NIR').divide(10000),
+        'B4': image.select('R'),
+        'B5': image.select('NIR'),
     }).rename('SAVI');
 
     #NORMALIZED DIFFERENCE WATER INDEX (NDWI)
@@ -66,14 +66,14 @@ def fexp_spec_ind(image):
     comp_onda = ee.Number(1.115e-05);
     lst = image.expression(
       'Tb / ( 1+ ( ( comp_onda * Tb / fator) * log_eNB))',{
-        'Tb': image.select('BRT').divide(10),
+        'Tb': image.select('BRT'),
         'comp_onda': comp_onda,
         'log_eNB': log_eNB,
         'fator': ee.Number(1.438e-02),
       }).rename('T_LST');
 
     #RESCALED BRIGHTNESS TEMPERATURE
-    brt_r = image.select('BRT').divide(10).rename('BRT_R');
+    brt_r = image.select('BRT').rename('BRT_R');
     proj = image.select('B').projection();
     latlon = ee.Image.pixelLonLat().reproject(proj);
     coords = latlon.select(['longitude', 'latitude']);
@@ -165,7 +165,12 @@ def fexp_lst_export(img_main,img_main_RAD,landsat_version,refpoly):
         c31 = -0.02892; c32 = 1.46051; c33 = -0.43199;
 
     # COEFFICIENTS FOR LANDSAT 8 JIMMENEZ-MUNOZ (2014)
-    if (landsat_version == 'LANDSAT_8'):
+    # if (landsat_version == 'LANDSAT_8'):
+    #     c11 = 0.04019; c12 = 0.02916; c13 = 1.01523;
+    #     c21 = -0.38333; c22 = -1.50294; c23 = 0.20324;
+    #     c31 = 0.00918; c32 = 1.36072; c33 = -0.27514;
+    
+    if landsat_version in ['LANDSAT_8', 'LANDSAT_9']:
         c11 = 0.04019; c12 = 0.02916; c13 = 1.01523;
         c21 = -0.38333; c22 = -1.50294; c23 = 0.20324;
         c31 = 0.00918; c32 = 1.36072; c33 = -0.27514;

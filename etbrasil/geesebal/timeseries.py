@@ -24,7 +24,7 @@ import datetime
 
 #FOLDERS
 from .landsatcollection import fexp_landsat_5Coordinate, fexp_landsat_7Coordinate, fexp_landsat_8Coordinate
-from .masks import (f_cloudMaskL457_SR,f_cloudMaskL8_SR,f_albedoL5L7,f_albedoL8)
+from .masks import (apply_scale_factorsL8_SR, apply_scale_factorsL457_SR, f_cloudMaskL457_SR,f_cloudMaskL8_SR,f_albedoL5L7,f_albedoL8)
 from .meteorology import get_meteorology
 from .tools import (fexp_spec_ind, fexp_lst_export,fexp_radlong_up, LST_DEM_correction,
 fexp_radshort_down, fexp_radlong_down, fexp_radbalance, fexp_soil_heat,fexp_sensible_heat_flux)
@@ -94,15 +94,14 @@ class TimeSeries():
             self.image=ee.Image(self.image)
 
             #PRINT ID
-            print(self.image.get('LANDSAT_ID').getInfo())
+            print(self.image.get('LANDSAT_PRODUCT_ID').getInfo())
 
             #GET INFORMATIONS FROM IMAGE
             self._index=self.image.get('system:index')
             self.cloud_cover=self.image.get('CLOUD_COVER')
-            self.LANDSAT_ID=self.image.get('LANDSAT_ID').getInfo()
-            self.landsat_version=self.image.get('SATELLITE').getInfo()
-            self.zenith_angle=self.image.get('SOLAR_ZENITH_ANGLE')
-            self.azimuth_angle=self.image.get('SOLAR_AZIMUTH_ANGLE')
+            self.LANDSAT_ID=self.image.get('LANDSAT_PRODUCT_ID').getInfo()
+            self.landsat_version=self.image.get('SPACECRAFT_ID').getInfo()
+            self.sun_elevation=self.image.get('SUN_ELEVATION').getInfo()
             self.time_start=self.image.get('system:time_start')
             self._date=ee.Date(self.time_start)
             self._year=ee.Number(self._date.get('year'))
@@ -122,53 +121,83 @@ class TimeSeries():
 
             #MAKS
             if self.landsat_version == 'LANDSAT_5':
-                 #self.image=self.image .select([0,1,2,3,4,5,6,9], ["B","GR","R","NIR","SWIR_1","BRT","SWIR_2", "pixel_qa"])
-                 self.image_toa=ee.Image('LANDSAT/LT05/C01/T1/'+ self.CollectionList[n][4:])
+                 # self.image = self.image.select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5' ,'ST_B6' ,'SR_B7' ,'QA_PIXEL'],
+                 #                                ["B"    ,"GR"   ,"R"    ,"NIR"  ,"SWIR_1","BRT"   ,"SWIR_2","pixel_qa"])
+                 #self.image_toa=ee.Image('LANDSAT/LT05/C02/T1_TOA/'+ self.CollectionList[n][4:])
 
-             #GET CALIBRATED RADIANCE
-                 self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa);
-                 self.col_rad = self.image.addBands(self.col_rad.select([5],["T_RAD"]))
+                 #GET CALIBRATED RADIANCE
+                 #self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa);
+                 #self.col_rad = self.image.addBands(self.col_rad.select(['B6'],["T_RAD"]))
 
-             #CLOUD REMOTION
-                 self.image=ee.ImageCollection(self.image).map(f_cloudMaskL457_SR)
+                #APPLY SCALE FACTORS
+                self.image=ee.ImageCollection(self.image).map(apply_scale_factorsL457_SR)
+                #CLOUD REMOTION
+                self.image=ee.ImageCollection(self.image).map(f_cloudMaskL457_SR)
 
-             #ALBEDO TASUMI ET AL. (2008)
-                 self.image=self.image.map(f_albedoL5L7)
+                #ALBEDO TASUMI ET AL. (2008)
+                self.image=self.image.map(f_albedoL5L7)
 
             elif self.landsat_version == 'LANDSAT_7':
-                #self.image=self.image .select([0,1,2,3,4,5,6,9], ["B","GR","R","NIR","SWIR_1","BRT","SWIR_2", "pixel_qa"])
-                 self.image_toa=ee.Image('LANDSAT/LE07/C01/T1/'+ self.CollectionList[n][4:])
+                 # self.image = self.image.select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5' ,'ST_B6' ,'SR_B7' ,'QA_PIXEL'],
+                 #                                ["B"    ,"GR"   ,"R"    ,"NIR"  ,"SWIR_1","BRT"   ,"SWIR_2","pixel_qa"])
+                 #self.image_toa=ee.Image('LANDSAT/LE07/C02/T1_TOA/'+ self.CollectionList[n][4:])
 
-             #GET CALIBRATED RADIANCE
-                 self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa);
-                 self.col_rad = self.image.addBands(self.col_rad.select([5],["T_RAD"]))
+                 #GET CALIBRATED RADIANCE
+                 #self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa);
+                 #self.col_rad = self.image.addBands(self.col_rad.select(['B6_VCID_1'],["T_RAD"]))
 
-             #CLOUD REMOTION
-                 self.image=ee.ImageCollection(self.image).map(f_cloudMaskL457_SR)
+                #APPLY SCALE FACTORS
+                self.image=ee.ImageCollection(self.image).map(apply_scale_factorsL457_SR)
 
-             #ALBEDO TASUMI ET AL. (2008)
-                 self.image=self.image.map(f_albedoL5L7)
+                #CLOUD REMOTION
+                self.image=ee.ImageCollection(self.image).map(f_cloudMaskL457_SR)
 
-            else:
-                #self.image = self.select([0,1,2,3,4,5,6,7,10],["UB","B","GR","R","NIR","SWIR_1","SWIR_2","BRT","pixel_qa"])
-                self.image_toa=ee.Image('LANDSAT/LC08/C01/T1/'+self.CollectionList[n][2:])
+                #ALBEDO TASUMI ET AL. (2008)
+                self.image=self.image.map(f_albedoL5L7)
 
-             #GET CALIBRATED RADIANCE
-                self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa)
-                self.col_rad = self.image.addBands(self.col_rad.select([9],["T_RAD"]))
+            elif self.landsat_version == 'LANDSAT_8':
+                # self.image = self.image.select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B6' ,'SR_B7' ,'ST_B10','QA_PIXEL'],
+                #                                ["UB"   ,"B"    ,"GR"   ,"R"    ,"NIR"  ,"SWIR_1","SWIR_2","BRT"   ,"pixel_qa"])
+                #self.image_toa=ee.Image('LANDSAT/LC08/C02/T1_TOA/'+self.CollectionList[n][2:])
 
-             #CLOUD REMOTION
+                #GET CALIBRATED RADIANCE
+                #self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa)
+                #self.col_rad = self.image.addBands(self.col_rad.select(['B10'],["T_RAD"]))
+                
+                #APPLY SCALE FACTORS
+                self.image=ee.ImageCollection(self.image).map(apply_scale_factorsL8_SR)
+
+                #CLOUD REMOTION
                 self.image=ee.ImageCollection(self.image).map(f_cloudMaskL8_SR)
 
-             #ALBEDO TASUMI ET AL. (2008) METHOD WITH KE ET AL. (2016) COEFFICIENTS
+                 #ALBEDO TASUMI ET AL. (2008) METHOD WITH KE ET AL. (2016) COEFFICIENTS
                 self.image=self.image.map(f_albedoL8)
+            
+            elif self.landsat_version == 'LANDSAT_9':
+                # self.image = self.image.select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B6' ,'SR_B7' ,'ST_B10','QA_PIXEL'],
+                #                                ["UB"   ,"B"    ,"GR"   ,"R"    ,"NIR"  ,"SWIR_1","SWIR_2","BRT"   ,"pixel_qa"])
+                #self.image_toa=ee.Image('LANDSAT/LC08/C02/T1_TOA/'+self.CollectionList[n][2:])
+
+                #GET CALIBRATED RADIANCE
+                #self.col_rad = ee.Algorithms.Landsat.calibratedRadiance(self.image_toa)
+                #self.col_rad = self.image.addBands(self.col_rad.select(['B10'],["T_RAD"]))
+                
+                #APPLY SCALE FACTORS
+                self.image=ee.ImageCollection(self.image).map(apply_scale_factorsL8_SR)
+
+                #CLOUD REMOTION
+                self.image=ee.ImageCollection(self.image).map(f_cloudMaskL8_SR)
+
+                 #ALBEDO TASUMI ET AL. (2008) METHOD WITH KE ET AL. (2016) COEFFICIENTS
+                self.image=self.image.map(f_albedoL8)
+                
+            else: 
+                raise Exception('Landsat 9 not added yet.')
 
             #GEOMETRY
             self.geometryReducer=self.image.geometry().bounds().getInfo()
             self.geometry_download=self.geometryReducer['coordinates']
             self.camada_clip=self.image.select('BRT').first()
-
-            self.sun_elevation=ee.Number(90).subtract(self.zenith_angle)
 
             col_meteorology= get_meteorology(self.image,self.time_start)
 
@@ -190,67 +219,73 @@ class TimeSeries():
             self.z_alt = self.srtm.select('elevation')
 
             #TO AVOID ERRORS DURING THE PROCESS
-            #try:
-            #GET IMAGE
-            self.image=self.image.first()
+            try:
+                #GET IMAGE
+                self.image=self.image.first()
 
-            #SPECTRAL IMAGES (NDVI, EVI, SAVI, LAI, T_LST, e_0, e_NB, long, lat)
-            self.image=fexp_spec_ind(self.image)
+                #SPECTRAL IMAGES (NDVI, EVI, SAVI, LAI, T_LST, e_0, e_NB, long, lat)
+                self.image=fexp_spec_ind(self.image)
 
-            #LAND SURFACE TEMPERATURE
-            #self.image =fexp_lst_export(self.image,self.col_rad,self.landsat_version,self.geometryReducer)
-            self.image=LST_DEM_correction(self.image, self.z_alt, self.T_air, self.UR,self.sun_elevation,self._hour,self._minuts)
+                #LAND SURFACE TEMPERATURE
+                #self.image =fexp_lst_export(self.image,self.col_rad,self.landsat_version,self.geometryReducer)
+                self.image=LST_DEM_correction(self.image, self.z_alt, self.T_air, self.UR,self.sun_elevation,self._hour,self._minuts)
 
-            #COLD PIXEL
-            self.d_cold_pixel=fexp_cold_pixel(self.image, self.geometryReducer, self.p_top_NDVI, self.p_coldest_Ts)
+                #COLD PIXEL
+                self.d_cold_pixel=fexp_cold_pixel(self.image, self.geometryReducer, self.p_top_NDVI, self.p_coldest_Ts)
 
-            #COLD PIXEL NUMBER
-            self.n_Ts_cold = ee.Number(self.d_cold_pixel.get('temp').getInfo())
+                #COLD PIXEL NUMBER
+                self.n_Ts_cold = ee.Number(self.d_cold_pixel.get('temp').getInfo())
 
-            #INSTANTANEOUS OUTGOING LONG-WAVE RADIATION [W M-2]
-            self.image=fexp_radlong_up(self.image)
+                #INSTANTANEOUS OUTGOING LONG-WAVE RADIATION [W M-2]
+                self.image=fexp_radlong_up(self.image)
 
-            #INSTANTANEOUS INCOMING SHORT-WAVE RADIATION [W M-2]
-            self.image=fexp_radshort_down(self.image,self.z_alt,self.T_air,self.UR, self.sun_elevation)
+                #INSTANTANEOUS INCOMING SHORT-WAVE RADIATION [W M-2]
+                self.image=fexp_radshort_down(self.image,self.z_alt,self.T_air,self.UR, self.sun_elevation)
 
-            #INSTANTANEOUS INCOMING LONGWAVE RADIATION [W M-2]
-            self.image=fexp_radlong_down(self.image, self.n_Ts_cold)
+                #INSTANTANEOUS INCOMING LONGWAVE RADIATION [W M-2]
+                self.image=fexp_radlong_down(self.image, self.n_Ts_cold)
 
-            #INSTANTANEOUS NET RADIATON BALANCE [W M-2]
-            self.image=fexp_radbalance(self.image)
+                #INSTANTANEOUS NET RADIATON BALANCE [W M-2]
+                self.image=fexp_radbalance(self.image)
 
-            #SOIL HEAT FLUX (G) [W M-2]
-            self.image=fexp_soil_heat(self.image)
+                #SOIL HEAT FLUX (G) [W M-2]
+                self.image=fexp_soil_heat(self.image)
 
-            #HOT PIXEL
-            self.d_hot_pixel=fexp_hot_pixel(self.image, self.geometryReducer,self.p_lowest_NDVI, self.p_hottest_Ts)
+                #HOT PIXEL
+                self.d_hot_pixel=fexp_hot_pixel(self.image, self.geometryReducer,self.p_lowest_NDVI, self.p_hottest_Ts)
 
-            #SENSIBLE HEAT FLUX (H) [W M-2]
-            self.image=fexp_sensible_heat_flux(self.image, self.ux, self.UR,self.Rn24hobs,self.n_Ts_cold,
-                                               self.d_hot_pixel, self.date_string, self.geometryReducer)
+                #SENSIBLE HEAT FLUX (H) [W M-2]
+                self.image=fexp_sensible_heat_flux(self.image, self.ux, self.UR,self.Rn24hobs,self.n_Ts_cold,
+                                                self.d_hot_pixel, self.date_string, self.geometryReducer)
 
-            #DAILY EVAPOTRANSPIRATION (ET_24H) [MM DAY-1]
-            self.image=fexp_et(self.image,self.Rn24hobs)
+                #DAILY EVAPOTRANSPIRATION (ET_24H) [MM DAY-1]
+                self.image=fexp_et(self.image,self.Rn24hobs)
 
-            self.NAME_FINAL=self.LANDSAT_ID[:5]+self.LANDSAT_ID[10:17]+self.LANDSAT_ID[17:25]
-            self.ET_daily=self.image.select(['ET_24h'],[self.NAME_FINAL])
+                self.NAME_FINAL=self.LANDSAT_ID[:5]+self.LANDSAT_ID[10:17]+self.LANDSAT_ID[17:25]
+                self.ET_daily=self.image.select(['ET_24h'],[self.NAME_FINAL])
 
-            #EXTRACT ET VALUE
-            self.ET_point = self.ET_daily.reduceRegion(
-                reducer=ee.Reducer.first(),
-                geometry=self.coordinate,
-                scale=30,
-                maxPixels=1e14)
+                # Mask out negative ET values by using the updateMask function
+                self.ET_daily = self.ET_daily.updateMask(self.ET_daily.gte(0))
+                
+                #EXTRACT ET VALUE
+                self.ET_point = self.ET_daily.reduceRegion(
+                    reducer=ee.Reducer.mean(),
+                    geometry=self.coordinate,
+                    scale=30,
+                    maxPixels=1e14)
 
-            #GET DATE AND DAILY ET
-            self._Date = datetime.datetime.strptime(self.date_string,'%Y-%m-%d')
-            self.ET_point_get = ee.Number(self.ET_point.get(self.NAME_FINAL)).getInfo()
+                #GET DATE AND DAILY ET
+                self._Date = datetime.datetime.strptime(self.date_string,'%Y-%m-%d')
+                self.ET_point_get = ee.Number(self.ET_point.get(self.NAME_FINAL)).getInfo()
 
-            #ADD LIST
-            self.List_ET.append(self.ET_point_get)
-            self.List_Date.append(self._Date)
+                #ADD LIST
+                self.List_ET.append(self.ET_point_get)
+                self.List_Date.append(self._Date)
 
-            #except:
+            except Exception as e:
+                # Log the error and skip the problematic image
+                print(f'Error processing image {n}: {e}')
+
                 # ERRORS CAN OCCUR WHEN:
                 # - THERE IS NO METEOROLOGICAL INFORMATION.
                 # - ET RETURN NULL IF AT THE POINT WAS APPLIED MASK CLOUD.
@@ -260,3 +295,7 @@ class TimeSeries():
                 #print('An error has occurred.')
 
             n=n+1
+
+    def get_list(self):
+        return self.List_ET, self.List_Date
+    
