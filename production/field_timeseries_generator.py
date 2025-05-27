@@ -61,11 +61,11 @@ class FieldTimeSeriesGenerator:
         self.schema_name = schema_name
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Load environment variables and initialize connections
+          # Load environment variables and initialize connections
         load_env_file()
         self.engine = create_database_connection()
-          # Initialize Earth Engine
+        
+        # Initialize Earth Engine
         try:
             ee.Initialize()
             print("✅ Earth Engine initialized successfully")
@@ -73,11 +73,14 @@ class FieldTimeSeriesGenerator:
             print(f"❌ Failed to initialize Earth Engine: {e}")
             sys.exit(1)
     
-    def get_all_tables(self):
+    def get_all_tables(self, season_filter=None):
         """
         Get all tables in the specified schema that contain field data.
         
         Following the notebook pattern, looks for tables ending with '_consolidado'.
+        
+        Args:
+            season_filter (str, optional): Filter by season 'inv' (winter) or 'ver' (summer)
         
         Returns:
             list: List of table names containing geographic data
@@ -113,7 +116,21 @@ class FieldTimeSeriesGenerator:
             # Filter tables that likely contain field data
             tables = [t for t in all_tables if any(keyword in t.lower() 
                            for keyword in ['campo', 'lote', 'field', 'parcela', 'consolidado'])]
-            
+        
+        # Apply season filtering if specified
+        if season_filter:
+            season_filter = season_filter.lower()
+            if season_filter not in ['inv', 'ver']:
+                print(f"⚠️  Warning: Invalid season filter '{season_filter}'. Valid options: 'inv' (winter), 'ver' (summer)")
+                print("   Proceeding without season filtering...")
+            else:
+                original_count = len(tables)
+                # Filter tables by season pattern: schema_season_consolidado
+                tables = [t for t in tables if f"_{season_filter}" in t.lower()]
+                season_name = "winter" if season_filter == "inv" else "summer"
+                print(f"🌱 Season filter applied: {season_name} ({season_filter})")
+                print(f"📊 Filtered from {original_count} to {len(tables)} tables")
+        
         print(f"📋 Found {len(tables)} tables in schema '{self.schema_name}': {tables}")
         return tables
     
@@ -207,15 +224,14 @@ class FieldTimeSeriesGenerator:
             except Exception as e:
                 print(f"❌ Error processing field {campo}_{lote}: {e}")
                 continue
-        
-        # Summary for this table
+          # Summary for this table
         print(f"\n📊 TABLE '{table_name}' SUMMARY:")
         print(f"   ✅ Successfully processed: {successful_fields} fields")
         print(f"   ⚠️  Skipped (no intersection): {skipped_fields} fields")
         print(f"   ❌ Failed: {len(field_data) - successful_fields - skipped_fields} fields")
         print(f"   🚀 OPTIMIZATION: Used 1 collection for {len(field_data)} fields")
     
-    def generate_time_series(self, start_date, end_date, table_filter=None):
+    def generate_time_series(self, start_date, end_date, table_filter=None, season_filter=None):
         """
         Generate time series for all fields in the schema.
         
@@ -223,14 +239,19 @@ class FieldTimeSeriesGenerator:
             start_date (str): Start date for time series (YYYY-MM-DD)
             end_date (str): End date for time series (YYYY-MM-DD)
             table_filter (str, optional): Process only specific table
+            season_filter (str, optional): Filter by season 'inv' (winter) or 'ver' (summer)
         """
         print(f"🚀 Starting OPTIMIZED Field Time Series Generation")
         print(f"📂 Schema: {self.schema_name}")
         print(f"📅 Date Range: {start_date} to {end_date}")
         print(f"💾 Output Directory: {self.output_dir}")
         
+        if season_filter:
+            season_name = "winter" if season_filter.lower() == "inv" else "summer" if season_filter.lower() == "ver" else season_filter
+            print(f"🌱 Season Filter: {season_name} ({season_filter})")
+        
         # Get tables to process
-        all_tables = self.get_all_tables()
+        all_tables = self.get_all_tables(season_filter=season_filter)
         
         if table_filter:
             tables_to_process = [t for t in all_tables if table_filter.lower() in t.lower()]
@@ -301,6 +322,11 @@ def main():
         "--table", 
         help="Process only specific table (optional filter)"
     )
+    parser.add_argument(
+        "--season", 
+        choices=['inv', 'ver'], 
+        help="Filter tables by season: 'inv' for winter, 'ver' for summer"
+    )
     
     args = parser.parse_args()
     
@@ -319,7 +345,8 @@ def main():
         generator.generate_time_series(
             start_date=args.start_date,
             end_date=args.end_date,
-            table_filter=args.table
+            table_filter=args.table,
+            season_filter=args.season
         )
         
     except KeyboardInterrupt:
