@@ -261,16 +261,17 @@ def generate_field_timeseries(schema, output_dir, database_uri=None, table_name=
         end_month (int): Ending month for the collection
         end_day (int): Ending day for the collection
         cloud_cover (int): Maximum cloud cover percentage
-    """    # Default database URI using environment variables
-    if database_uri is None:        # Get credentials from environment variables for security
+    """    # Default database URI from environment variables
+    if database_uri is None:
         db_user = os.getenv('DB_USER', 'postgres')
         db_password = os.getenv('DB_PASSWORD')
         db_host = os.getenv('DB_HOST')
         db_name = os.getenv('DB_NAME')
         
-        if not db_password or not db_host or not db_name:
-            raise ValueError("Database credentials must be set via environment variables: DB_PASSWORD, DB_HOST, DB_NAME")
-        
+        if not db_password:
+            print("Error: DB_PASSWORD environment variable not set!")
+            return
+            
         database_uri = f'postgresql://{db_user}:{db_password}@{db_host}/{db_name}'
     
     # Initialize Earth Engine

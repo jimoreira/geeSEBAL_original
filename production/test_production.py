@@ -13,7 +13,17 @@ def test_database_connection():
     """Test database connection and table listing"""
     print("Testing database connection...")
     
-    database_uri = 'postgresql://postgres:Sinergia7@ec2-3-134-97-6.us-east-2.compute.amazonaws.com/shiny_actbiologico'
+    # Load database credentials from environment variables
+    db_user = os.getenv('DB_USER', 'postgres')
+    db_password = os.getenv('DB_PASSWORD')
+    db_host = os.getenv('DB_HOST')
+    db_name = os.getenv('DB_NAME')
+    
+    if not db_password:
+        print("Error: DB_PASSWORD environment variable not set!")
+        return False
+    
+    database_uri = f'postgresql://{db_user}:{db_password}@{db_host}/{db_name}'
     schema = 'carballal'
     
     try:

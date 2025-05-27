@@ -8,7 +8,7 @@ from a PostGIS database using geeSEBAL and Google Earth Engine.
 Usage:
     python field_timeseries_generator.py --schema carballal --output_dir ./output_tifs
 
-Author: Generated from geeSEBAL notebook workflow
+Author: Ing. Agr. Javier Moreira
 """
 
 import os
@@ -23,6 +23,24 @@ import geemap
 import wxee
 import ee
 
+# Load environment variables from .env file
+def load_env_file():
+    """Load environment variables from .env file if it exists"""
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        with open(env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip()
+        print("✓ Loaded environment variables from .env file")
+    else:
+        print("⚠️  No .env file found. Make sure to set environment variables manually.")
+
+# Load environment variables at module level
+load_env_file()
+
 # Add parent directory to path for geeSEBAL imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from etbrasil.geesebal import Collection
@@ -36,13 +54,21 @@ class FieldTimeSeriesGenerator:
             schema (str): Database schema name
             output_dir (str): Output directory for generated TIF files
             database_uri (str): Database connection URI (optional)
-        """
-        self.schema = schema
+        """        self.schema = schema
         self.output_dir = output_dir
         
-        # Default database connection
+        # Default database connection using environment variables
         if database_uri is None:
-            self.database_uri = 'postgresql://postgres:Sinergia7@ec2-3-134-97-6.us-east-2.compute.amazonaws.com/shiny_actbiologico'
+            # Get credentials from environment variables for security
+            db_user = os.getenv('DB_USER', 'postgres')
+            db_password = os.getenv('DB_PASSWORD')
+            db_host = os.getenv('DB_HOST')
+            db_name = os.getenv('DB_NAME')
+            
+            if not db_password or not db_host or not db_name:
+                raise ValueError("Database credentials must be set via environment variables: DB_PASSWORD, DB_HOST, DB_NAME")
+            
+            self.database_uri = f'postgresql://{db_user}:{db_password}@{db_host}/{db_name}'
         else:
             self.database_uri = database_uri
             
@@ -107,14 +133,12 @@ class FieldTimeSeriesGenerator:
 
         # Filter out rows where 'fecha_siembra' is NaN or 'NaT'
         filtered_gdf = gdf[gdf['fecha_siembra'].notna() & (gdf['fecha_siembra'] != 'NaT')]
-        
-        if filtered_gdf.empty:
+          if filtered_gdf.empty:
             print("No valid fecha_siembra data found!")
             return None, None
         
         # Convert filtered GeoDataFrame to GeoJSON
         geojson = json.loads(filtered_gdf.to_json())
-        
         # Convert the filtered GeoJSON to an Earth Engine object
         subset_asset = geemap.geojson_to_ee(geojson)
         
@@ -123,12 +147,48 @@ class FieldTimeSeriesGenerator:
         
         return filtered_gdf, geom
     
+    def get_table_bounds_geometry(self, gdf):
+        """Create a bounding box geometry that encompasses all features in the table"""
+        # Get the total bounds of all geometries in the GeoDataFrame
+        bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
+        
+        # Add a buffer to ensure we capture edge effects (buffer in degrees ~1km)
+        buffer = 0.01  
+        bounds_buffered = [
+            bounds[0] - buffer,  # minx
+            bounds[1] - buffer,  # miny  
+            bounds[2] + buffer,  # maxx
+            bounds[3] + buffer   # maxy
+        ]
+        
+        # Create Earth Engine rectangle geometry
+        bounds_geom = ee.Geometry.Rectangle(bounds_buffered)
+        
+        print(f"Table bounds: {bounds}")
+        print(f"Buffered collection area: {bounds_buffered}")
+        
+        return bounds_geom
+      def check_geometry_intersection(self, field_geom, collection_bounds):
+        """Check if a field geometry intersects with the collection bounds"""
+        try:
+            # Convert field geometry to Earth Engine geometry
+            field_bounds = ee.Geometry.Rectangle([
+                field_geom.bounds[0], field_geom.bounds[1], 
+                field_geom.bounds[2], field_geom.bounds[3]
+            ])
+            # Check intersection
+            intersects = collection_bounds.intersects(field_bounds).getInfo()
+            return intersects
+        except Exception as e:
+            print(f"Warning: Could not check geometry intersection: {e}")
+            return True  # Assume intersection to be safe
+    
     def create_image_collection(self, geom, start_year=2024, start_month=11, start_day=1,
                                end_year=2025, end_month=4, end_day=21, cloud_cover=20):
         """Create geeSEBAL collection and convert to image collection
         
         Args:
-            geom: Earth Engine geometry object
+            geom: Earth Engine geometry object (should be table bounds)
             start_year (int): Starting year for the collection
             start_month (int): Starting month for the collection
             start_day (int): Starting day for the collection
@@ -136,8 +196,12 @@ class FieldTimeSeriesGenerator:
             end_month (int): Ending month for the collection
             end_day (int): Ending day for the collection
             cloud_cover (int): Maximum cloud cover percentage
+        
+        Returns:
+            tuple: (image_collection, collection_bounds_geom)
         """
         print(f"Creating geeSEBAL Collection from {start_year}-{start_month:02d}-{start_day:02d} to {end_year}-{end_month:02d}-{end_day:02d}...")
+        print("Using table bounds geometry for efficient collection creation...")
         
         # Create geeSEBAL Collection filtered by geometry
         geeSEBAL_Collection = Collection(
@@ -151,12 +215,12 @@ class FieldTimeSeriesGenerator:
         
         if not collection_et:
             print("No valid ET bands were added to the collection.")
-            return None
+            return None, None
         
-        print("Collection ET bands:", collection_et.bandNames().getInfo())
+        bands = collection_et.bandNames().getInfo()
+        print(f"Collection ET created with {len(bands)} bands: {bands[:3]}..." if len(bands) > 3 else f"Collection ET bands: {bands}")
         
         # Transform collection to image collection with dates
-        bands = collection_et.bandNames().getInfo()
         image_list = []
         
         for band in bands:
@@ -175,14 +239,21 @@ class FieldTimeSeriesGenerator:
             
             # Add the image to the list
             image_list.append(single_band_image)
-        
-        # Create an ImageCollection from the list of images
+          # Create an ImageCollection from the list of images
         image_collection = ee.ImageCollection.fromImages(image_list)
-        
-        return image_collection
+        # Return both the collection and the bounds geometry for intersection checks
+        return image_collection, geom
     
-    def process_field_timeseries(self, gdf, image_collection, campo_value, lote_value):
-        """Process time series for a specific campo and lote"""
+    def process_field_timeseries(self, gdf, image_collection, collection_bounds, campo_value, lote_value):
+        """Process time series for a specific campo and lote
+        
+        Args:
+            gdf: GeoDataFrame with field data
+            image_collection: Earth Engine ImageCollection
+            collection_bounds: Earth Engine geometry bounds of the collection
+            campo_value: Campo name
+            lote_value: Lote number
+        """
         print(f"Processing field: {campo_value}, lote: {lote_value}")
         
         # Subset the GeoDataFrame based on campo and lote
@@ -194,6 +265,12 @@ class FieldTimeSeriesGenerator:
         
         # Dissolve geometry
         dissolved_geometry = subset_gdf.dissolve().geometry.iloc[0]
+        
+        # Check if field geometry intersects with collection bounds
+        intersects = self.check_geometry_intersection(dissolved_geometry, collection_bounds)
+        if not intersects:
+            print(f"⚠️  WARNING: Field {campo_value}-{lote_value} does not intersect with collection bounds. Skipping...")
+            return False
         
         # Convert image collection to xarray using wxee
         print("Converting to xarray dataset...")
@@ -285,8 +362,7 @@ class FieldTimeSeriesGenerator:
         if not table_list:
             print(f"No consolidado tables found in schema: {self.schema}")
             return
-        
-        print(f"Found {len(table_list)} consolidado tables: {table_list}")
+          print(f"Found {len(table_list)} consolidado tables: {table_list}")
         
         for table in table_list:
             print(f"\n{'='*50}")
@@ -303,37 +379,52 @@ class FieldTimeSeriesGenerator:
             if geom is None:
                 continue
             
-            # Create image collection
-            image_collection = self.create_image_collection(
-                geom, start_year, start_month, start_day,
+            # Create a bounding box geometry that encompasses all fields in the table
+            # This is more efficient than creating individual collections for each field
+            table_bounds_geom = self.get_table_bounds_geometry(filtered_gdf)
+            
+            # Create image collection using table bounds (OPTIMIZED APPROACH)
+            print("🚀 Creating collection once for entire table (optimized approach)...")
+            image_collection, collection_bounds = self.create_image_collection(
+                table_bounds_geom, start_year, start_month, start_day,
                 end_year, end_month, end_day, cloud_cover
-            )
-            if image_collection is None:
+            )            if image_collection is None:
                 continue
             
             # Get unique campo-lote combinations
             campo_lote_combinations = filtered_gdf[['campo', 'lote']].drop_duplicates()
             
             print(f"Found {len(campo_lote_combinations)} campo-lote combinations")
+            print("Now subsetting the collection for each individual field...")
             
-            # Process each combination
+            # Process each combination using the same collection (OPTIMIZED APPROACH)
             successful_count = 0
+            skipped_count = 0
             for _, row in campo_lote_combinations.iterrows():
                 campo_value = row['campo']
                 lote_value = str(row['lote'])
                 
                 try:
                     success = self.process_field_timeseries(
-                        filtered_gdf, image_collection, campo_value, lote_value
+                        filtered_gdf, image_collection, collection_bounds, campo_value, lote_value
                     )
                     if success:
                         successful_count += 1
+                    else:
+                        skipped_count += 1
                         
                 except Exception as e:
                     print(f"Error processing {campo_value}-{lote_value}: {e}")
+                    skipped_count += 1
                     continue
             
-            print(f"\nCompleted processing {successful_count}/{len(campo_lote_combinations)} field combinations for table: {table}")
+            print(f"\n📊 SUMMARY for table: {table}")
+            print(f"✅ Successfully processed: {successful_count}/{len(campo_lote_combinations)} field combinations")
+            if skipped_count > 0:
+                print(f"⚠️  Skipped (no intersection or errors): {skipped_count}")
+            print(f"🎯 Collection created only once for entire table (optimized!)")
+        
+        print(f"\n🎉 All processing complete! Check output directory: {self.output_dir}")
 
 
 def main():

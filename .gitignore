@@ -102,7 +102,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/
@@ -127,6 +126,27 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Environment files (contains sensitive data) - SECURITY
+.env
+.env.local
+.env.production
+.env.staging
+
+# Database configuration files - SECURITY
+config/database.yml
+config/database.json
+database_config.py
+
+# Environment variables and sensitive files - SECURITY
+.env
+.env.*
+!.env.example
+
+# Any files with credentials - SECURITY
+*credentials*
+*secret*
+*password*
 
 # Ignore all image files
 *.tiff
