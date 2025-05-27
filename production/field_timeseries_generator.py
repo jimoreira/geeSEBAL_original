@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Field Time Series Generator
-
+Field Time Series Generator - OPTIMIZED VERSION
 This script generates time series images for each field (campo and lote) combination
 from a PostGIS database using geeSEBAL and Google Earth Engine.
+
+OPTIMIZATION: Creates image collections once per table using table bounds geometry,
+then subsets for individual fields, significantly improving performance.
 
 Usage:
     python field_timeseries_generator.py --schema carballal --output_dir ./output_tifs
 
 Author: Ing. Agr. Javier Moreira
+Optimized: AI Assistant
 """
 
 import os
@@ -22,449 +25,309 @@ from sqlalchemy import create_engine, text
 import geemap
 import wxee
 import ee
+from datetime import datetime
+from pathlib import Path
 
-# Load environment variables from .env file
-def load_env_file():
-    """Load environment variables from .env file if it exists"""
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    os.environ[key.strip()] = value.strip()
-        print("✓ Loaded environment variables from .env file")
-    else:
-        print("⚠️  No .env file found. Make sure to set environment variables manually.")
+# Import our optimized utility functions
+from field_timeseries_utils import (
+    load_env_file,
+    create_database_connection,
+    get_field_data,
+    get_table_bounds_geometry,
+    create_image_collection,
+    check_geometry_intersection,
+    process_field_timeseries
+)
 
-# Load environment variables at module level
-load_env_file()
-
-# Add parent directory to path for geeSEBAL imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from etbrasil.geesebal import Collection
 
 class FieldTimeSeriesGenerator:
-    def __init__(self, schema, output_dir, database_uri=None):
+    """
+    OPTIMIZED Field Time Series Generator
+    
+    Generates ET time series for agricultural fields using an optimized workflow:
+    1. Creates image collections once per table using table bounds
+    2. Subsets collections for individual field geometries
+    3. Includes intersection checking and performance logging
+    """
+    
+    def __init__(self, schema_name, output_dir):
         """
-        Initialize the Field Time Series Generator
+        Initialize the generator with schema and output directory.
         
         Args:
-            schema (str): Database schema name
-            output_dir (str): Output directory for generated TIF files
-            database_uri (str): Database connection URI (optional)
-        """        self.schema = schema
-        self.output_dir = output_dir
+            schema_name (str): PostgreSQL schema containing field data
+            output_dir (str): Directory to save generated time series images
+        """
+        self.schema_name = schema_name
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Default database connection using environment variables
-        if database_uri is None:
-            # Get credentials from environment variables for security
-            db_user = os.getenv('DB_USER', 'postgres')
-            db_password = os.getenv('DB_PASSWORD')
-            db_host = os.getenv('DB_HOST')
-            db_name = os.getenv('DB_NAME')
-            
-            if not db_password or not db_host or not db_name:
-                raise ValueError("Database credentials must be set via environment variables: DB_PASSWORD, DB_HOST, DB_NAME")
-            
-            self.database_uri = f'postgresql://{db_user}:{db_password}@{db_host}/{db_name}'
-        else:
-            self.database_uri = database_uri
-            
-        # Create output directory if it doesn't exist
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Initialize Earth Engine
+        # Load environment variables and initialize connections
+        load_env_file()
+        self.engine = create_database_connection()
+          # Initialize Earth Engine
         try:
-            ee.Initialize(project='tercero')
-            print("Earth Engine initialized successfully")
+            ee.Initialize()
+            print("✅ Earth Engine initialized successfully")
         except Exception as e:
-            print(f"Error initializing Earth Engine: {e}")
-            print("Please authenticate with: ee.Authenticate()")
-            
-        # Initialize database connection
-        self.engine = create_engine(self.database_uri)
+            print(f"❌ Failed to initialize Earth Engine: {e}")
+            sys.exit(1)
+    
+    def get_all_tables(self):
+        """
+        Get all tables in the specified schema that contain field data.
         
-    def get_consolidado_tables(self):
-        """Get list of consolidated tables from the database schema"""
+        Following the notebook pattern, looks for tables ending with '_consolidado'.
+        
+        Returns:
+            list: List of table names containing geographic data
+        """
         query = text("""
             SELECT table_name
             FROM information_schema.tables
-            WHERE table_schema = :schema
-            AND table_name LIKE '%_consolidado';
-        """).bindparams(schema=self.schema)
+            WHERE table_schema = :schema_name
+            AND table_name LIKE '%_consolidado'
+            ORDER BY table_name
+        """)
         
-        with self.engine.connect() as connection:
-            result = connection.execute(query)
-            rows = result.fetchall()
-            tables_df = pd.DataFrame(rows, columns=['table_name'])
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {"schema_name": self.schema_name})
+            tables = [row[0] for row in result.fetchall()]
+        
+        if not tables:
+            print(f"⚠️  No '_consolidado' tables found in schema '{self.schema_name}'")
+            print("   Falling back to all tables with potential field keywords...")
             
-        return tables_df['table_name'].tolist()
+            # Fallback: look for any tables with field-related keywords
+            query_fallback = text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = :schema_name 
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """)
+            
+            result = conn.execute(query_fallback, {"schema_name": self.schema_name})
+            all_tables = [row[0] for row in result.fetchall()]
+            
+            # Filter tables that likely contain field data
+            tables = [t for t in all_tables if any(keyword in t.lower() 
+                           for keyword in ['campo', 'lote', 'field', 'parcela', 'consolidado'])]
+            
+        print(f"📋 Found {len(tables)} tables in schema '{self.schema_name}': {tables}")
+        return tables
     
-    def load_table_data(self, table_name):
-        """Load spatial data from a specific table"""
-        print(f"Loading table: {table_name}")
+    def process_table_optimized(self, table_name, start_date, end_date):
+        """
+        OPTIMIZED: Process all fields in a table using a single image collection.
         
-        # Load the table into a GeoDataFrame
-        gdf = gpd.read_postgis(
-            f'SELECT * FROM "{self.schema}"."{table_name}"', 
-            self.engine, 
-            geom_col='geom'
-        )
-        
-        # Process the table (convert 'fecha_siembra' to string if it exists)
-        if 'fecha_siembra' in gdf.columns:
-            gdf['fecha_siembra'] = gdf['fecha_siembra'].astype(str)
-        
-        print(f"Loaded GeoDataFrame for table: {table_name} with {len(gdf)} rows")
-        
-        if gdf.empty:
-            print("GeoDataFrame is empty!")
-            return None
-        
-        return gdf
-    
-    def get_filtered_geometry(self, gdf):
-        """Filter GeoDataFrame and convert to Earth Engine geometry"""
-        if gdf is None:
-            print("GeoDataFrame is not loaded yet!")
-            return None, None
-
-        # Filter out rows where 'fecha_siembra' is NaN or 'NaT'
-        filtered_gdf = gdf[gdf['fecha_siembra'].notna() & (gdf['fecha_siembra'] != 'NaT')]
-          if filtered_gdf.empty:
-            print("No valid fecha_siembra data found!")
-            return None, None
-        
-        # Convert filtered GeoDataFrame to GeoJSON
-        geojson = json.loads(filtered_gdf.to_json())
-        # Convert the filtered GeoJSON to an Earth Engine object
-        subset_asset = geemap.geojson_to_ee(geojson)
-        
-        # Extract geometry from the Earth Engine object
-        geom = subset_asset.geometry()
-        
-        return filtered_gdf, geom
-    
-    def get_table_bounds_geometry(self, gdf):
-        """Create a bounding box geometry that encompasses all features in the table"""
-        # Get the total bounds of all geometries in the GeoDataFrame
-        bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
-        
-        # Add a buffer to ensure we capture edge effects (buffer in degrees ~1km)
-        buffer = 0.01  
-        bounds_buffered = [
-            bounds[0] - buffer,  # minx
-            bounds[1] - buffer,  # miny  
-            bounds[2] + buffer,  # maxx
-            bounds[3] + buffer   # maxy
-        ]
-        
-        # Create Earth Engine rectangle geometry
-        bounds_geom = ee.Geometry.Rectangle(bounds_buffered)
-        
-        print(f"Table bounds: {bounds}")
-        print(f"Buffered collection area: {bounds_buffered}")
-        
-        return bounds_geom
-      def check_geometry_intersection(self, field_geom, collection_bounds):
-        """Check if a field geometry intersects with the collection bounds"""
-        try:
-            # Convert field geometry to Earth Engine geometry
-            field_bounds = ee.Geometry.Rectangle([
-                field_geom.bounds[0], field_geom.bounds[1], 
-                field_geom.bounds[2], field_geom.bounds[3]
-            ])
-            # Check intersection
-            intersects = collection_bounds.intersects(field_bounds).getInfo()
-            return intersects
-        except Exception as e:
-            print(f"Warning: Could not check geometry intersection: {e}")
-            return True  # Assume intersection to be safe
-    
-    def create_image_collection(self, geom, start_year=2024, start_month=11, start_day=1,
-                               end_year=2025, end_month=4, end_day=21, cloud_cover=20):
-        """Create geeSEBAL collection and convert to image collection
+        This is the key optimization - creates collection once per table using
+        table bounds, then subsets for individual fields.
         
         Args:
-            geom: Earth Engine geometry object (should be table bounds)
-            start_year (int): Starting year for the collection
-            start_month (int): Starting month for the collection
-            start_day (int): Starting day for the collection
-            end_year (int): Ending year for the collection
-            end_month (int): Ending month for the collection
-            end_day (int): Ending day for the collection
-            cloud_cover (int): Maximum cloud cover percentage
-        
-        Returns:
-            tuple: (image_collection, collection_bounds_geom)
+            table_name (str): Name of the table to process
+            start_date (str): Start date for time series (YYYY-MM-DD)
+            end_date (str): End date for time series (YYYY-MM-DD)
         """
-        print(f"Creating geeSEBAL Collection from {start_year}-{start_month:02d}-{start_day:02d} to {end_year}-{end_month:02d}-{end_day:02d}...")
-        print("Using table bounds geometry for efficient collection creation...")
+        print(f"\n🚀 OPTIMIZED PROCESSING: Starting table '{table_name}'")
+        print(f"📅 Date range: {start_date} to {end_date}")
         
-        # Create geeSEBAL Collection filtered by geometry
-        geeSEBAL_Collection = Collection(
-            start_year, start_month, start_day,
-            end_year, end_month, end_day,
-            cloud_cover, geom
+        # Step 1: Get all field data from the table
+        field_data = get_field_data(self.engine, self.schema_name, table_name)
+        
+        if field_data.empty:
+            print(f"⚠️  No field data found in table '{table_name}'")
+            return
+        
+        print(f"📊 Found {len(field_data)} fields in table '{table_name}'")
+        
+        # Step 2: OPTIMIZATION - Get table bounds geometry (once per table)
+        print("🔧 OPTIMIZATION: Creating table bounds geometry...")
+        table_bounds_geom = get_table_bounds_geometry(
+            self.engine, self.schema_name, table_name
         )
         
-        # Get the Collection_ET object
-        collection_et = geeSEBAL_Collection.Collection_ET
+        if table_bounds_geom is None:
+            print(f"❌ Could not create bounds geometry for table '{table_name}'")
+            return
         
-        if not collection_et:
-            print("No valid ET bands were added to the collection.")
-            return None, None
+        # Step 3: OPTIMIZATION - Create image collection once using table bounds
+        print("🔧 OPTIMIZATION: Creating image collection for entire table...")
+        collection_result = create_image_collection(
+            table_bounds_geom, start_date, end_date
+        )
         
-        bands = collection_et.bandNames().getInfo()
-        print(f"Collection ET created with {len(bands)} bands: {bands[:3]}..." if len(bands) > 3 else f"Collection ET bands: {bands}")
+        if collection_result is None:
+            print(f"❌ Failed to create image collection for table '{table_name}'")
+            return
         
-        # Transform collection to image collection with dates
-        image_list = []
+        # Unpack the result
+        image_collection, collection_bounds_geom = collection_result
+        collection_size = image_collection.size().getInfo()
         
-        for band in bands:
-            # Extract the band as a single-band image
-            single_band_image = collection_et.select([band])
+        print(f"✅ OPTIMIZATION SUCCESS: Created collection with {collection_size} images")
+        print(f"🎯 Collection will be reused for all {len(field_data)} fields in this table")
+        
+        # Step 4: Process each field using the shared collection
+        successful_fields = 0
+        skipped_fields = 0
+        
+        for idx, field_row in field_data.iterrows():
+            campo = field_row['campo']
+            lote = field_row['lote']
+            geometry = field_row['geometry']
             
-            # Extract the date from the band name
-            date_str = band.split('_')[-1]
-            date = ee.Date.parse('YYYYMMdd', date_str)
+            print(f"\n📍 Processing field {idx+1}/{len(field_data)}: {campo}_{lote}")
             
-            # Set the date as a property for time-sorting
-            single_band_image = single_band_image.set('system:time_start', date.millis())
+            # OPTIMIZATION: Check if field geometry intersects with collection bounds
+            if not check_geometry_intersection(geometry, collection_bounds_geom):
+                print(f"⚠️  WARNING: Field {campo}_{lote} does not intersect with collection bounds")
+                print(f"   This field will be skipped to prevent errors")
+                skipped_fields += 1
+                continue
             
-            # Rename the band to 'etr'
-            single_band_image = single_band_image.rename('etr')
-            
-            # Add the image to the list
-            image_list.append(single_band_image)
-          # Create an ImageCollection from the list of images
-        image_collection = ee.ImageCollection.fromImages(image_list)
-        # Return both the collection and the bounds geometry for intersection checks
-        return image_collection, geom
+            # Process the field using the shared collection
+            try:
+                success = process_field_timeseries(
+                    campo=campo,
+                    lote=lote,
+                    geometry=geometry,
+                    image_collection=image_collection,  # Reused collection!
+                    output_dir=self.output_dir,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                if success:
+                    successful_fields += 1
+                    print(f"✅ Successfully processed {campo}_{lote}")
+                else:
+                    print(f"❌ Failed to process {campo}_{lote}")
+                    
+            except Exception as e:
+                print(f"❌ Error processing field {campo}_{lote}: {e}")
+                continue
+        
+        # Summary for this table
+        print(f"\n📊 TABLE '{table_name}' SUMMARY:")
+        print(f"   ✅ Successfully processed: {successful_fields} fields")
+        print(f"   ⚠️  Skipped (no intersection): {skipped_fields} fields")
+        print(f"   ❌ Failed: {len(field_data) - successful_fields - skipped_fields} fields")
+        print(f"   🚀 OPTIMIZATION: Used 1 collection for {len(field_data)} fields")
     
-    def process_field_timeseries(self, gdf, image_collection, collection_bounds, campo_value, lote_value):
-        """Process time series for a specific campo and lote
+    def generate_time_series(self, start_date, end_date, table_filter=None):
+        """
+        Generate time series for all fields in the schema.
         
         Args:
-            gdf: GeoDataFrame with field data
-            image_collection: Earth Engine ImageCollection
-            collection_bounds: Earth Engine geometry bounds of the collection
-            campo_value: Campo name
-            lote_value: Lote number
+            start_date (str): Start date for time series (YYYY-MM-DD)
+            end_date (str): End date for time series (YYYY-MM-DD)
+            table_filter (str, optional): Process only specific table
         """
-        print(f"Processing field: {campo_value}, lote: {lote_value}")
+        print(f"🚀 Starting OPTIMIZED Field Time Series Generation")
+        print(f"📂 Schema: {self.schema_name}")
+        print(f"📅 Date Range: {start_date} to {end_date}")
+        print(f"💾 Output Directory: {self.output_dir}")
         
-        # Subset the GeoDataFrame based on campo and lote
-        subset_gdf = gdf[(gdf['campo'] == campo_value) & (gdf['lote'] == lote_value)]
+        # Get tables to process
+        all_tables = self.get_all_tables()
         
-        if subset_gdf.empty:
-            print(f"No data found for campo: {campo_value}, lote: {lote_value}")
-            return False
+        if table_filter:
+            tables_to_process = [t for t in all_tables if table_filter.lower() in t.lower()]
+            if not tables_to_process:
+                print(f"❌ No tables found matching filter: {table_filter}")
+                return
+        else:
+            tables_to_process = all_tables
         
-        # Dissolve geometry
-        dissolved_geometry = subset_gdf.dissolve().geometry.iloc[0]
+        print(f"📋 Processing {len(tables_to_process)} tables: {tables_to_process}")
         
-        # Check if field geometry intersects with collection bounds
-        intersects = self.check_geometry_intersection(dissolved_geometry, collection_bounds)
-        if not intersects:
-            print(f"⚠️  WARNING: Field {campo_value}-{lote_value} does not intersect with collection bounds. Skipping...")
-            return False
+        # Process each table with optimization
+        total_start_time = datetime.now()
         
-        # Convert image collection to xarray using wxee
-        print("Converting to xarray dataset...")
-        geom_bounds = dissolved_geometry.bounds
-        
-        # Create a simple bounding box geometry for the region
-        region_geom = ee.Geometry.Rectangle([
-            geom_bounds[0], geom_bounds[1], geom_bounds[2], geom_bounds[3]
-        ])
-        
-        try:
-            ds = image_collection.wx.to_xarray(
-                region=region_geom,
-                scale=30
-            )
+        for table_idx, table_name in enumerate(tables_to_process, 1):
+            print(f"\n{'='*60}")
+            print(f"📊 PROCESSING TABLE {table_idx}/{len(tables_to_process)}: {table_name}")
+            print(f"{'='*60}")
             
-            # Process time series
-            original_time_series = ds.chunk('auto')
-            
-            time_series_resampled = original_time_series.resample(time='15D').max()
-            time_series_resampled.attrs = original_time_series.attrs.copy()
-            
-            time_series_interpolated = time_series_resampled.chunk(dict(time=-1)).interpolate_na('time', use_coordinate=False)
-            
-            # Clip to field boundary
-            subset_da = time_series_interpolated.etr.rio.clip([dissolved_geometry], subset_gdf.crs)
-            
-            # Save time series as TIF files
-            self.save_timeseries_tifs(subset_da, campo_value, lote_value)
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error processing field {campo_value}-{lote_value}: {e}")
-            return False
-    
-    def save_timeseries_tifs(self, subset_da, campo_value, lote_value):
-        """Save time series data as TIF files"""
-        print(f"Saving TIF files for {campo_value}-{lote_value}...")
-        
-        field_output_dir = os.path.join(self.output_dir, f"{campo_value}_{lote_value}")
-        os.makedirs(field_output_dir, exist_ok=True)
-        
-        saved_count = 0
-        
-        for time in subset_da.time.values:
-            image = subset_da.sel(time=time)
-            
-            # Transform the image to suit rioxarray format
-            image = image.transpose('y', 'x').rio.write_crs('EPSG:4326')
-            
-            date = np.datetime_as_string(time, unit='D')
-            output_file = f'{campo_value}_{lote_value}_{date}.tif'
-            output_path = os.path.join(field_output_dir, output_file)
+            table_start_time = datetime.now()
             
             try:
-                if os.path.exists(output_path):
-                    os.remove(output_path)
+                self.process_table_optimized(table_name, start_date, end_date)
                 
-                image.rio.to_raster(output_path, driver='COG')
-                saved_count += 1
-                print(f"Saved: {output_file}")
+                table_duration = datetime.now() - table_start_time
+                print(f"⏱️  Table '{table_name}' completed in: {table_duration}")
                 
             except Exception as e:
-                print(f"Error saving {output_file}: {e}")
-        
-        print(f"Saved {saved_count} TIF files for {campo_value}-{lote_value}")
-    
-    def process_all_fields(self, table_name=None, start_year=2024, start_month=11, start_day=1,
-                          end_year=2025, end_month=4, end_day=21, cloud_cover=20):
-        """Process all campo-lote combinations from all tables or a specific table
-        
-        Args:
-            table_name (str): Specific table to process (optional)
-            start_year (int): Starting year for the collection
-            start_month (int): Starting month for the collection
-            start_day (int): Starting day for the collection
-            end_year (int): Ending year for the collection
-            end_month (int): Ending month for the collection
-            end_day (int): Ending day for the collection
-            cloud_cover (int): Maximum cloud cover percentage
-        """
-        
-        if table_name:
-            table_list = [table_name]
-        else:
-            table_list = self.get_consolidado_tables()
-        
-        if not table_list:
-            print(f"No consolidado tables found in schema: {self.schema}")
-            return
-          print(f"Found {len(table_list)} consolidado tables: {table_list}")
-        
-        for table in table_list:
-            print(f"\n{'='*50}")
-            print(f"Processing table: {table}")
-            print(f"{'='*50}")
-            
-            # Load table data
-            gdf = self.load_table_data(table)
-            if gdf is None:
+                print(f"❌ Error processing table '{table_name}': {e}")
                 continue
-            
-            # Get filtered geometry for the entire table
-            filtered_gdf, geom = self.get_filtered_geometry(gdf)
-            if geom is None:
-                continue
-            
-            # Create a bounding box geometry that encompasses all fields in the table
-            # This is more efficient than creating individual collections for each field
-            table_bounds_geom = self.get_table_bounds_geometry(filtered_gdf)
-            
-            # Create image collection using table bounds (OPTIMIZED APPROACH)
-            print("🚀 Creating collection once for entire table (optimized approach)...")
-            image_collection, collection_bounds = self.create_image_collection(
-                table_bounds_geom, start_year, start_month, start_day,
-                end_year, end_month, end_day, cloud_cover
-            )            if image_collection is None:
-                continue
-            
-            # Get unique campo-lote combinations
-            campo_lote_combinations = filtered_gdf[['campo', 'lote']].drop_duplicates()
-            
-            print(f"Found {len(campo_lote_combinations)} campo-lote combinations")
-            print("Now subsetting the collection for each individual field...")
-            
-            # Process each combination using the same collection (OPTIMIZED APPROACH)
-            successful_count = 0
-            skipped_count = 0
-            for _, row in campo_lote_combinations.iterrows():
-                campo_value = row['campo']
-                lote_value = str(row['lote'])
-                
-                try:
-                    success = self.process_field_timeseries(
-                        filtered_gdf, image_collection, collection_bounds, campo_value, lote_value
-                    )
-                    if success:
-                        successful_count += 1
-                    else:
-                        skipped_count += 1
-                        
-                except Exception as e:
-                    print(f"Error processing {campo_value}-{lote_value}: {e}")
-                    skipped_count += 1
-                    continue
-            
-            print(f"\n📊 SUMMARY for table: {table}")
-            print(f"✅ Successfully processed: {successful_count}/{len(campo_lote_combinations)} field combinations")
-            if skipped_count > 0:
-                print(f"⚠️  Skipped (no intersection or errors): {skipped_count}")
-            print(f"🎯 Collection created only once for entire table (optimized!)")
         
-        print(f"\n🎉 All processing complete! Check output directory: {self.output_dir}")
+        # Final summary
+        total_duration = datetime.now() - total_start_time
+        print(f"\n{'='*60}")
+        print(f"🎉 OPTIMIZED PROCESSING COMPLETE!")
+        print(f"⏱️  Total Duration: {total_duration}")
+        print(f"📂 Output Directory: {self.output_dir}")
+        print(f"🚀 Used optimized workflow with collection reuse")
+        print(f"{'='*60}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate time series images for fields from PostGIS database')
-    parser.add_argument('--schema', required=True, help='Database schema name')
-    parser.add_argument('--output_dir', required=True, help='Output directory for TIF files')
-    parser.add_argument('--table', help='Specific table name (optional, processes all if not specified)')
-    parser.add_argument('--database_uri', help='Database connection URI (optional)')
-    
-    # Date range parameters
-    parser.add_argument('--start_year', type=int, default=2024, help='Starting year (default: 2024)')
-    parser.add_argument('--start_month', type=int, default=11, help='Starting month (default: 11)')
-    parser.add_argument('--start_day', type=int, default=1, help='Starting day (default: 1)')
-    parser.add_argument('--end_year', type=int, default=2025, help='Ending year (default: 2025)')
-    parser.add_argument('--end_month', type=int, default=4, help='Ending month (default: 4)')
-    parser.add_argument('--end_day', type=int, default=21, help='Ending day (default: 21)')
-    parser.add_argument('--cloud_cover', type=int, default=20, help='Maximum cloud cover percentage (default: 20)')
+    """Main function to run the field time series generator."""
+    parser = argparse.ArgumentParser(
+        description="Generate optimized time series images for agricultural fields"
+    )
+    parser.add_argument(
+        "--schema", 
+        required=True, 
+        help="PostgreSQL schema name containing field data"
+    )
+    parser.add_argument(
+        "--output_dir", 
+        default="./output_tifs",
+        help="Output directory for time series images (default: ./output_tifs)"
+    )
+    parser.add_argument(
+        "--start_date", 
+        default="2024-10-01",
+        help="Start date for time series (YYYY-MM-DD, default: 2024-10-01)"
+    )
+    parser.add_argument(
+        "--end_date", 
+        default="2025-04-30",
+        help="End date for time series (YYYY-MM-DD, default: 2025-04-30)"
+    )
+    parser.add_argument(
+        "--table", 
+        help="Process only specific table (optional filter)"
+    )
     
     args = parser.parse_args()
     
-    # Create generator instance
-    generator = FieldTimeSeriesGenerator(
-        schema=args.schema,
-        output_dir=args.output_dir,
-        database_uri=args.database_uri
-    )
+    # Validate date format
+    try:
+        datetime.strptime(args.start_date, "%Y-%m-%d")
+        datetime.strptime(args.end_date, "%Y-%m-%d")
+    except ValueError as e:
+        print(f"❌ Invalid date format: {e}")
+        print("Please use YYYY-MM-DD format")
+        sys.exit(1)
     
-    # Process all fields with date parameters
-    generator.process_all_fields(
-        table_name=args.table,
-        start_year=args.start_year,
-        start_month=args.start_month, 
-        start_day=args.start_day,
-        end_year=args.end_year,
-        end_month=args.end_month,
-        end_day=args.end_day,
-        cloud_cover=args.cloud_cover
-    )
-    
-    print(f"\nProcessing complete! Check output directory: {args.output_dir}")
+    # Create and run generator
+    try:
+        generator = FieldTimeSeriesGenerator(args.schema, args.output_dir)
+        generator.generate_time_series(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            table_filter=args.table
+        )
+        
+    except KeyboardInterrupt:
+        print("\n⚠️  Process interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Critical error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

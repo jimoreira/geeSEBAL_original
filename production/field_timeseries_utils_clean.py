@@ -86,8 +86,6 @@ def get_field_data(engine, schema_name, table_name):
     """
     Get field data from a specific table in the database.
     
-    Following the notebook pattern, loads all data and handles geometry appropriately.
-    
     Args:
         engine: SQLAlchemy database engine
         schema_name (str): Database schema name
@@ -96,64 +94,27 @@ def get_field_data(engine, schema_name, table_name):
     Returns:
         geopandas.GeoDataFrame: DataFrame with field data and geometries
     """
+    query = f"""
+        SELECT 
+            campo,
+            lote,
+            ST_AsText(geom) as geometry_wkt,
+            geom
+        FROM {schema_name}.{table_name}
+        WHERE geom IS NOT NULL
+        ORDER BY campo, lote
+    """
+    
     try:
-        # First, let's check what columns exist in the table
-        columns_query = text("""
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_schema = :schema_name 
-            AND table_name = :table_name
-            ORDER BY ordinal_position
-        """)
-        
-        with engine.connect() as conn:
-            result = conn.execute(columns_query, {
-                "schema_name": schema_name, 
-                "table_name": table_name
-            })
-            columns_info = result.fetchall()
-        
-        print(f"📊 Table columns: {[col[0] for col in columns_info]}")
-        
-        # Find geometry column (could be 'geom', 'geometry', 'the_geom', etc.)
-        geom_column = None
-        for col_name, data_type in columns_info:
-            if 'geometry' in data_type.lower() or col_name.lower() in ['geom', 'geometry', 'the_geom']:
-                geom_column = col_name
-                break
-        
-        if not geom_column:
-            print(f"❌ No geometry column found in table {schema_name}.{table_name}")
-            return pd.DataFrame()
-        
-        print(f"🎯 Using geometry column: '{geom_column}'")
-        
-        # Load the selected table into a GeoDataFrame (same as notebook)
-        query = f'SELECT * FROM "{schema_name}"."{table_name}"'
-        
+        # Load data using geopandas for automatic geometry handling
         gdf = gpd.read_postgis(
             query, 
             engine, 
-            geom_col=geom_column,
+            geom_col='geom',
             crs='EPSG:4326'  # Assuming WGS84
         )
         
-        # Process the table (convert 'fecha_siembra' to string if it exists, same as notebook)
-        if 'fecha_siembra' in gdf.columns:
-            gdf['fecha_siembra'] = gdf['fecha_siembra'].astype(str)
-        
-        # Filter out rows where geometry is null
-        gdf = gdf[gdf[geom_column].notna()]
-        
         print(f"📊 Loaded {len(gdf)} records from {schema_name}.{table_name}")
-        
-        # Check if we have campo and lote columns
-        if 'campo' not in gdf.columns or 'lote' not in gdf.columns:
-            print(f"⚠️  Warning: 'campo' or 'lote' columns not found in table")
-            print(f"   Available columns: {list(gdf.columns)}")
-            # Return empty DataFrame if required columns are missing
-            return pd.DataFrame()
-        
         return gdf
         
     except Exception as e:
@@ -177,42 +138,15 @@ def get_table_bounds_geometry(engine, schema_name, table_name):
         ee.Geometry: Earth Engine geometry representing table bounds with buffer
     """
     try:
-        # First, find the geometry column name
-        columns_query = text("""
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_schema = :schema_name 
-            AND table_name = :table_name
-            ORDER BY ordinal_position
-        """)
-        
-        with engine.connect() as conn:
-            result = conn.execute(columns_query, {
-                "schema_name": schema_name, 
-                "table_name": table_name
-            })
-            columns_info = result.fetchall()
-        
-        # Find geometry column
-        geom_column = None
-        for col_name, data_type in columns_info:
-            if 'geometry' in data_type.lower() or col_name.lower() in ['geom', 'geometry', 'the_geom']:
-                geom_column = col_name
-                break
-        
-        if not geom_column:
-            print(f"❌ No geometry column found in table {schema_name}.{table_name}")
-            return None
-        
-        # Get the bounds of all geometries in the table using the correct column name
+        # Get the bounds of all geometries in the table
         query = text(f"""
             SELECT 
-                ST_XMin(ST_Extent({geom_column})) as minx,
-                ST_YMin(ST_Extent({geom_column})) as miny,
-                ST_XMax(ST_Extent({geom_column})) as maxx,
-                ST_YMax(ST_Extent({geom_column})) as maxy
+                ST_XMin(ST_Extent(geom)) as minx,
+                ST_YMin(ST_Extent(geom)) as miny,
+                ST_XMax(ST_Extent(geom)) as maxx,
+                ST_YMax(ST_Extent(geom)) as maxy
             FROM {schema_name}.{table_name}
-            WHERE {geom_column} IS NOT NULL
+            WHERE geom IS NOT NULL
         """)
         
         with engine.connect() as conn:
@@ -264,20 +198,12 @@ def create_image_collection(geometry, start_date, end_date):
         print(f"🚀 Creating optimized image collection...")
         print(f"   📅 Date range: {start_date} to {end_date}")
         
-        # Parse date strings to extract year, month, day components
-        start_parts = start_date.split('-')
-        end_parts = end_date.split('-')
-        
-        start_year, start_month, start_day = int(start_parts[0]), int(start_parts[1]), int(start_parts[2])
-        end_year, end_month, end_day = int(end_parts[0]), int(end_parts[1]), int(end_parts[2])
-        
-        # Create the geeSEBAL collection using positional arguments (like notebook pattern)
-        # Format: Collection(year_start, month_start, day_start, year_end, month_end, day_end, cloud_cover, geometry)
+        # Create the geeSEBAL collection using the provided geometry
         col = Collection(
-            start_year, start_month, start_day,
-            end_year, end_month, end_day,
-            70,  # cloud_cover
-            geometry
+            date_start=start_date,
+            date_end=end_date,
+            cloud_cover=70,
+            geometry=geometry
         )
         
         # Get the Landsat collection
@@ -414,7 +340,8 @@ def process_field_timeseries(campo, lote, geometry, image_collection, output_dir
                     image.select(['ET']),  # Export ET band
                     filename=str(filepath),
                     scale=30,
-                    region=ee_geom,                    file_per_band=False
+                    region=ee_geom,
+                    file_per_band=False
                 )
                 
         print(f"✅ Exported timeseries for {campo}_{lote} to {field_output_dir}")
